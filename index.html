@@ -1,0 +1,722 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, doc, getDoc, addDoc, setDoc, updateDoc, onSnapshot, collection, query, where, getDocs } from 'firebase/firestore';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
+// import QRCode from 'qrcode.react'; // qrcode.react 대신 QRious 라이브러리를 사용합니다.
+
+// Global variables for Firebase config and app ID, provided by the environment
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+// Initialize Firebase outside the component to avoid re-initialization
+let app;
+let db;
+let auth;
+
+try {
+    app = initializeApp(firebaseConfig);
+    db = getFirestore(app);
+    auth = getAuth(app);
+} catch (error) {
+    console.error("Firebase initialization error:", error);
+    // Provide a fallback or error message in the UI if Firebase fails to initialize
+}
+
+
+// Utility function to generate a unique ID
+const generateUniqueId = () => {
+    return Math.random().toString(36).substring(2, 9);
+};
+
+// Reusable Chart Component
+const VoteCharts = ({ data }) => {
+    const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#AF19FF', '#FF19A3', '#19FFD6', '#A3FF19'];
+
+    return (
+        <div className="flex flex-col md:flex-row justify-center items-center gap-8 w-full">
+            {/* Bar Chart */}
+            <div className="w-full md:w-1/2 h-80 bg-white p-4 rounded-xl shadow-lg">
+                <h3 className="text-lg font-semibold mb-2 text-gray-800">막대 그래프</h3>
+                <ResponsiveContainer width="100%" height="90%">
+                    <BarChart data={data} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#e0e0e0" />
+                        <XAxis dataKey="name" tick={{ fill: '#333' }} />
+                        <YAxis allowDecimals={false} tick={{ fill: '#333' }} />
+                        <Tooltip cursor={{ fill: 'rgba(0,0,0,0.1)' }} contentStyle={{ backgroundColor: '#fff', border: '1px solid #ccc', borderRadius: '8px' }} />
+                        <Legend wrapperStyle={{ paddingTop: '10px' }} />
+                        <Bar dataKey="votes" fill="#8884d8" name="투표 수" radius={[10, 10, 0, 0]}>
+                            {data.map((entry, index) => (
+                                <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                            ))}
+                        </Bar>
+                    </BarChart>
+                </ResponsiveContainer>
+            </div>
+
+            {/* Pie Chart (Doughnut) */}
+            <div className="w-full md:w-1/2 h-80 bg-white p-4 rounded-xl shadow-lg">
+                <h3 className="text-lg font-semibold mb-2 text-gray-800">도넛형 차트</h3>
+                <ResponsiveContainer width="100%" height="90%">
+                    <PieChart>
+                        <Pie
+                            data={data}
+                            cx="50%"
+                            cy="50%"
+                            innerRadius={60}
+                            outerRadius={80}
+                            fill="#8884d8"
+                            paddingAngle={5}
+                            dataKey="votes"
+                            labelLine={false}
+                            label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
+                        >
+                            {data.map((entry, index) => (
+                                <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                            ))}
+                        </Pie>
+                        <Tooltip contentStyle={{ backgroundColor: '#fff', border: '1px solid #ccc', borderRadius: '8px' }} />
+                        <Legend wrapperStyle={{ paddingTop: '10px' }} />
+                    </PieChart>
+                </ResponsiveContainer>
+            </div>
+        </div>
+    );
+};
+
+// Local Voting Component
+const LocalVote = ({ onGoHome }) => {
+    const [phase, setPhase] = useState('setup'); // setup, voting, results
+    const [title, setTitle] = useState('');
+    const [items, setItems] = useState([]); // { id, name, votes }
+    const [newItemName, setNewItemName] = useState('');
+    const [votedCount, setVotedCount] = useState(0);
+    const [message, setMessage] = useState('');
+    const messageTimeoutRef = useRef(null);
+
+    // Function to show a temporary message
+    const showMessage = (msg, duration = 2000) => {
+        setMessage(msg);
+        if (messageTimeoutRef.current) {
+            clearTimeout(messageTimeoutRef.current);
+        }
+        messageTimeoutRef.current = setTimeout(() => {
+            setMessage('');
+        }, duration);
+    };
+
+    // Add a new voting item
+    const handleAddItem = () => {
+        if (newItemName.trim()) {
+            setItems([...items, { id: generateUniqueId(), name: newItemName.trim(), votes: 0 }]);
+            setNewItemName('');
+        }
+    };
+
+    // Remove a voting item
+    const handleRemoveItem = (idToRemove) => {
+        setItems(items.filter(item => item.id !== idToRemove));
+    };
+
+    // Start the voting process
+    const handleStartVote = () => {
+        if (title.trim() && items.length > 0) {
+            setPhase('voting');
+            showMessage('투표를 시작합니다! 첫 번째 분이 투표하세요.');
+        } else {
+            showMessage('투표 제목과 항목을 입력해주세요.');
+        }
+    };
+
+    // Handle a vote for a specific item
+    const handleVote = (id) => {
+        setItems(items.map(item =>
+            item.id === id ? { ...item, votes: item.votes + 1 } : item
+        ));
+        setVotedCount(prev => prev + 1);
+        showMessage('다음 사람이 투표하세요!');
+    };
+
+    // Show results
+    const handleShowResults = () => {
+        setPhase('results');
+    };
+
+    // Reset the vote
+    const handleReset = () => {
+        setPhase('setup');
+        setTitle('');
+        setItems([]);
+        setNewItemName('');
+        setVotedCount(0);
+        setMessage('');
+    };
+
+    return (
+        <div className="flex flex-col items-center p-4 bg-gray-50 min-h-screen">
+            <h2 className="text-3xl font-bold text-gray-800 mb-8 mt-4">한 기기용 (단말기 공유 투표)</h2>
+
+            {/* Message Display */}
+            {message && (
+                <div className="fixed top-20 bg-blue-500 text-white px-6 py-3 rounded-full shadow-lg z-50 animate-fade-in-down">
+                    {message}
+                </div>
+            )}
+
+            {phase === 'setup' && (
+                <div className="w-full max-w-2xl bg-white p-8 rounded-xl shadow-lg">
+                    <div className="mb-6">
+                        <label htmlFor="vote-title" className="block text-gray-700 text-lg font-semibold mb-2">투표 제목:</label>
+                        <input
+                            id="vote-title"
+                            type="text"
+                            className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition duration-200"
+                            placeholder="예: 급식 메뉴 투표"
+                            value={title}
+                            onChange={(e) => setTitle(e.target.value)}
+                        />
+                    </div>
+                    <div className="mb-6">
+                        <label htmlFor="new-item" className="block text-gray-700 text-lg font-semibold mb-2">투표 항목 추가:</label>
+                        <div className="flex gap-2">
+                            <input
+                                id="new-item"
+                                type="text"
+                                className="flex-grow p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition duration-200"
+                                placeholder="예: 돈까스"
+                                value={newItemName}
+                                onChange={(e) => setNewItemName(e.target.value)}
+                                onKeyPress={(e) => e.key === 'Enter' && handleAddItem()}
+                            />
+                            <button
+                                onClick={handleAddItem}
+                                className="px-5 py-3 bg-blue-600 text-white rounded-lg shadow-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition duration-200 text-lg font-medium"
+                            >
+                                추가
+                            </button>
+                        </div>
+                    </div>
+                    {items.length > 0 && (
+                        <div className="mb-6">
+                            <h3 className="text-gray-700 text-lg font-semibold mb-3">현재 항목:</h3>
+                            <ul className="space-y-2">
+                                {items.map((item) => (
+                                    <li key={item.id} className="flex justify-between items-center bg-gray-100 p-3 rounded-lg shadow-sm">
+                                        <span className="text-gray-800 text-base">{item.name}</span>
+                                        <button
+                                            onClick={() => handleRemoveItem(item.id)}
+                                            className="ml-4 text-red-500 hover:text-red-700 transition duration-200"
+                                            aria-label={`Remove ${item.name}`}
+                                        >
+                                            <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                                                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                                            </svg>
+                                        </button>
+                                    </li>
+                                ))}
+                            </ul>
+                        </div>
+                    )}
+                    <button
+                        onClick={handleStartVote}
+                        className="w-full py-4 bg-green-600 text-white rounded-lg shadow-xl hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 transition duration-200 text-xl font-bold"
+                    >
+                        투표 시작
+                    </button>
+                </div>
+            )}
+
+            {phase === 'voting' && (
+                <div className="w-full max-w-4xl bg-white p-8 rounded-xl shadow-lg text-center">
+                    <h3 className="text-4xl font-extrabold text-blue-700 mb-8">{title}</h3>
+                    <p className="text-xl text-gray-600 mb-6">총 투표 수: {votedCount}명</p>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        {items.map((item) => (
+                            <button
+                                key={item.id}
+                                onClick={() => handleVote(item.id)}
+                                className="relative flex items-center justify-center p-6 bg-blue-500 text-white rounded-xl shadow-lg hover:bg-blue-600 focus:outline-none focus:ring-4 focus:ring-blue-300 focus:ring-offset-2 transition duration-300 transform hover:scale-105 text-2xl font-bold min-h-[120px]"
+                            >
+                                {item.name}
+                                <span className="absolute top-2 right-4 text-white text-opacity-75 text-sm">
+                                    {item.votes} 표
+                                </span>
+                            </button>
+                        ))}
+                    </div>
+                    <button
+                        onClick={handleShowResults}
+                        className="mt-10 px-8 py-4 bg-purple-600 text-white rounded-lg shadow-xl hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2 transition duration-200 text-xl font-bold"
+                    >
+                        결과 보기
+                    </button>
+                </div>
+            )}
+
+            {phase === 'results' && (
+                <div className="w-full max-w-5xl bg-white p-8 rounded-xl shadow-lg text-center">
+                    <h3 className="text-4xl font-extrabold text-blue-700 mb-8">{title} - 결과</h3>
+                    <VoteCharts data={items.map(item => ({ name: item.name, votes: item.votes }))} />
+                    <div className="flex flex-col sm:flex-row justify-center gap-4 mt-10">
+                        <button
+                            onClick={handleReset}
+                            className="px-8 py-4 bg-red-600 text-white rounded-lg shadow-xl hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 transition duration-200 text-xl font-bold"
+                        >
+                            다시하기
+                        </button>
+                        <button
+                            onClick={onGoHome}
+                            className="px-8 py-4 bg-gray-600 text-white rounded-lg shadow-xl hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-gray-500 focus:ring-offset-2 transition duration-200 text-xl font-bold"
+                        >
+                            홈으로
+                        </button>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+};
+
+// Shared Voting Component
+const SharedVote = ({ onGoHome }) => {
+    const [phase, setPhase] = useState('setup'); // setup, created, participant
+    const [title, setTitle] = useState('');
+    const [items, setItems] = useState([]); // { id, name }
+    const [newItemName, setNewItemName] = useState('');
+    const [voteId, setVoteId] = useState('');
+    const [currentVoteData, setCurrentVoteData] = useState(null); // { title, items: [{id, name, votes}], realtimeResults }
+    const [realtimeResults, setRealtimeResults] = useState(true);
+    const [userId, setUserId] = useState(null);
+    const [isAuthReady, setIsAuthReady] = useState(false);
+    const [message, setMessage] = useState('');
+    const messageTimeoutRef = useRef(null);
+    const qrCanvasRef = useRef(null); // Ref for the QR code canvas
+
+    // Firebase Auth and Firestore setup
+    useEffect(() => {
+        if (!auth || !db) {
+            console.error("Firebase not initialized. Cannot proceed with auth/firestore.");
+            return;
+        }
+
+        const unsubscribe = onAuthStateChanged(auth, async (user) => {
+            if (user) {
+                setUserId(user.uid);
+            } else {
+                // Sign in anonymously if no user is logged in
+                try {
+                    if (initialAuthToken) {
+                        await signInWithCustomToken(auth, initialAuthToken);
+                    } else {
+                        await signInAnonymously(auth);
+                    }
+                } catch (error) {
+                    console.error("Anonymous sign-in failed:", error);
+                }
+            }
+            setIsAuthReady(true); // Auth state is ready
+        });
+
+        return () => unsubscribe();
+    }, []); // Run once on component mount
+
+    // Handle URL parsing for participant view
+    useEffect(() => {
+        const pathParts = window.location.pathname.split('/');
+        if (pathParts[1] === 'vote' && pathParts[2]) {
+            setVoteId(pathParts[2]);
+            setPhase('participant');
+        }
+    }, []);
+
+    // Fetch vote data for participant view
+    useEffect(() => {
+        if (phase === 'participant' && voteId && isAuthReady && db) {
+            const voteDocRef = doc(db, `artifacts/${appId}/public/data/votes`, voteId);
+            const unsubscribe = onSnapshot(voteDocRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    setCurrentVoteData(data);
+                } else {
+                    showMessage('투표를 찾을 수 없습니다.', 3000);
+                    setCurrentVoteData(null);
+                }
+            }, (error) => {
+                console.error("Error listening to vote document:", error);
+                showMessage('투표 데이터를 불러오는 중 오류가 발생했습니다.', 3000);
+            });
+
+            return () => unsubscribe();
+        }
+    }, [phase, voteId, isAuthReady, db]);
+
+    // Generate QR code using QRious
+    useEffect(() => {
+        if (qrCanvasRef.current && voteId && window.QRious) {
+            const currentUrl = `${window.location.origin}/vote/${voteId}`;
+            new window.QRious({
+                element: qrCanvasRef.current,
+                value: currentUrl,
+                size: 256,
+                level: 'H'
+            });
+        }
+    }, [voteId]); // Re-generate QR code if voteId changes
+
+    // Function to show a temporary message
+    const showMessage = (msg, duration = 2000) => {
+        setMessage(msg);
+        if (messageTimeoutRef.current) {
+            clearTimeout(messageTimeoutRef.current);
+        }
+        messageTimeoutRef.current = setTimeout(() => {
+            setMessage('');
+        }, duration);
+    };
+
+    // Add a new voting item for creation
+    const handleAddItem = () => {
+        if (newItemName.trim()) {
+            setItems([...items, { id: generateUniqueId(), name: newItemName.trim() }]);
+            setNewItemName('');
+        }
+    };
+
+    // Remove a voting item for creation
+    const handleRemoveItem = (idToRemove) => {
+        setItems(items.filter(item => item.id !== idToRemove));
+    };
+
+    // Create a new shared vote
+    const handleCreateVote = async () => {
+        if (!title.trim() || items.length === 0) {
+            showMessage('투표 제목과 항목을 입력해주세요.');
+            return;
+        }
+        if (!db || !userId) {
+            showMessage('데이터베이스 연결 또는 사용자 인증 대기 중입니다. 잠시 후 다시 시도해주세요.', 3000);
+            return;
+        }
+
+        try {
+            const initialItemsWithVotes = items.map(item => ({ ...item, votes: 0 }));
+            const newVoteId = generateUniqueId();
+            const voteData = {
+                title: title.trim(),
+                items: initialItemsWithVotes,
+                createdAt: new Date().toISOString(),
+                realtimeResults: realtimeResults,
+                createdBy: userId, // Store the creator's user ID
+            };
+
+            const voteDocRef = doc(db, `artifacts/${appId}/public/data/votes`, newVoteId);
+            await setDoc(voteDocRef, voteData);
+
+            setVoteId(newVoteId);
+            setPhase('created');
+            showMessage('투표가 성공적으로 생성되었습니다!', 2000);
+            // Update URL to reflect the created vote's ID
+            window.history.pushState({}, '', `/vote/${newVoteId}`);
+        } catch (e) {
+            console.error("Error adding document: ", e);
+            showMessage('투표 생성 중 오류가 발생했습니다.', 3000);
+        }
+    };
+
+    // Handle a vote from a participant
+    const handleParticipantVote = async (itemId) => {
+        if (!db || !userId || !currentVoteData || !voteId) {
+            showMessage('데이터베이스 연결 또는 투표 데이터 로드 대기 중입니다.', 3000);
+            return;
+        }
+
+        // Simple client-side 1 vote per user check using localStorage
+        const votedKey = `voted_${voteId}`;
+        const hasVoted = localStorage.getItem(votedKey);
+
+        if (hasVoted) {
+            showMessage('이미 투표하셨습니다.', 2000);
+            return;
+        }
+
+        try {
+            const voteDocRef = doc(db, `artifacts/${appId}/public/data/votes`, voteId);
+            const docSnap = await getDoc(voteDocRef);
+
+            if (docSnap.exists()) {
+                const data = docSnap.data();
+                const updatedItems = data.items.map(item =>
+                    item.id === itemId ? { ...item, votes: item.votes + 1 } : item
+                );
+                await updateDoc(voteDocRef, { items: updatedItems });
+                localStorage.setItem(votedKey, 'true'); // Mark as voted
+                showMessage('투표가 완료되었습니다!', 2000);
+            } else {
+                showMessage('투표를 찾을 수 없습니다.', 3000);
+            }
+        } catch (e) {
+            console.error("Error updating document: ", e);
+            showMessage('투표 중 오류가 발생했습니다.', 3000);
+        }
+    };
+
+    // Reset to setup phase
+    const handleReset = () => {
+        setPhase('setup');
+        setTitle('');
+        setItems([]);
+        setNewItemName('');
+        setVoteId('');
+        setCurrentVoteData(null);
+        setRealtimeResults(true);
+        window.history.pushState({}, '', '/share'); // Reset URL
+    };
+
+    const currentUrl = `${window.location.origin}/vote/${voteId}`;
+
+    return (
+        <div className="flex flex-col items-center p-4 bg-gray-50 min-h-screen">
+            <h2 className="text-3xl font-bold text-gray-800 mb-8 mt-4">여러 기기용 (링크 공유 투표)</h2>
+
+            {/* Message Display */}
+            {message && (
+                <div className="fixed top-20 bg-blue-500 text-white px-6 py-3 rounded-full shadow-lg z-50 animate-fade-in-down">
+                    {message}
+                </div>
+            )}
+
+            {phase === 'setup' && (
+                <div className="w-full max-w-2xl bg-white p-8 rounded-xl shadow-lg">
+                    <div className="mb-6">
+                        <label htmlFor="vote-title" className="block text-gray-700 text-lg font-semibold mb-2">투표 제목:</label>
+                        <input
+                            id="vote-title"
+                            type="text"
+                            className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition duration-200"
+                            placeholder="예: 우리 반 반장 선거"
+                            value={title}
+                            onChange={(e) => setTitle(e.target.value)}
+                        />
+                    </div>
+                    <div className="mb-6">
+                        <label htmlFor="new-item" className="block text-gray-700 text-lg font-semibold mb-2">투표 항목 추가:</label>
+                        <div className="flex gap-2">
+                            <input
+                                id="new-item"
+                                type="text"
+                                className="flex-grow p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition duration-200"
+                                placeholder="예: 김철수"
+                                value={newItemName}
+                                onChange={(e) => setNewItemName(e.target.value)}
+                                onKeyPress={(e) => e.key === 'Enter' && handleAddItem()}
+                            />
+                            <button
+                                onClick={handleAddItem}
+                                className="px-5 py-3 bg-blue-600 text-white rounded-lg shadow-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition duration-200 text-lg font-medium"
+                            >
+                                추가
+                            </button>
+                        </div>
+                    </div>
+                    {items.length > 0 && (
+                        <div className="mb-6">
+                            <h3 className="text-gray-700 text-lg font-semibold mb-3">현재 항목:</h3>
+                            <ul className="space-y-2">
+                                {items.map((item) => (
+                                    <li key={item.id} className="flex justify-between items-center bg-gray-100 p-3 rounded-lg shadow-sm">
+                                        <span className="text-gray-800 text-base">{item.name}</span>
+                                        <button
+                                            onClick={() => handleRemoveItem(item.id)}
+                                            className="ml-4 text-red-500 hover:text-red-700 transition duration-200"
+                                            aria-label={`Remove ${item.name}`}
+                                        >
+                                            <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                                                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                                            </svg>
+                                        </button>
+                                    </li>
+                                ))}
+                            </ul>
+                        </div>
+                    )}
+                    <div className="mb-6 flex items-center">
+                        <input
+                            type="checkbox"
+                            id="realtime-results"
+                            checked={realtimeResults}
+                            onChange={(e) => setRealtimeResults(e.target.checked)}
+                            className="h-5 w-5 text-blue-600 rounded focus:ring-blue-500"
+                        />
+                        <label htmlFor="realtime-results" className="ml-2 text-gray-700 text-lg font-semibold">실시간 결과 공개</label>
+                    </div>
+                    <button
+                        onClick={handleCreateVote}
+                        className="w-full py-4 bg-green-600 text-white rounded-lg shadow-xl hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 transition duration-200 text-xl font-bold"
+                    >
+                        투표 링크 생성
+                    </button>
+                </div>
+            )}
+
+            {phase === 'created' && (
+                <div className="w-full max-w-2xl bg-white p-8 rounded-xl shadow-lg text-center">
+                    <h3 className="text-3xl font-bold text-gray-800 mb-6">투표가 생성되었습니다!</h3>
+                    <p className="text-xl text-gray-700 mb-4">링크를 공유하거나 QR 코드를 스캔하세요:</p>
+                    <a
+                        href={currentUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="block text-blue-600 hover:underline text-lg mb-6 break-all"
+                    >
+                        {currentUrl}
+                    </a>
+                    <div className="flex justify-center mb-8 p-4 bg-gray-100 rounded-lg">
+                        {/* QRious library will render the QR code here */}
+                        <canvas ref={qrCanvasRef} className="w-64 h-64"></canvas>
+                    </div>
+                    <p className="text-gray-600 text-sm mb-4">
+                        참가자는 각자 스마트폰으로 접속 후 투표하며, 쿠키/IP 기반으로 1인 1표 제한됩니다.
+                    </p>
+                    <div className="flex flex-col sm:flex-row justify-center gap-4 mt-6">
+                        <button
+                            onClick={handleReset}
+                            className="px-8 py-4 bg-red-600 text-white rounded-lg shadow-xl hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 transition duration-200 text-xl font-bold"
+                        >
+                            새 투표 만들기
+                        </button>
+                        <button
+                            onClick={onGoHome}
+                            className="px-8 py-4 bg-gray-600 text-white rounded-lg shadow-xl hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-gray-500 focus:ring-offset-2 transition duration-200 text-xl font-bold"
+                        >
+                            홈으로
+                        </button>
+                    </div>
+                </div>
+            )}
+
+            {phase === 'participant' && currentVoteData && (
+                <div className="w-full max-w-4xl bg-white p-8 rounded-xl shadow-lg text-center">
+                    <h3 className="text-4xl font-extrabold text-blue-700 mb-8">{currentVoteData.title}</h3>
+                    <p className="text-lg text-gray-600 mb-6">
+                        투표에 참여해주세요! (사용자 ID: {userId ? userId.substring(0, 8) + '...' : '로딩 중...'})
+                    </p>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+                        {currentVoteData.items.map((item) => (
+                            <button
+                                key={item.id}
+                                onClick={() => handleParticipantVote(item.id)}
+                                className="relative flex items-center justify-center p-6 bg-blue-500 text-white rounded-xl shadow-lg hover:bg-blue-600 focus:outline-none focus:ring-4 focus:ring-blue-300 focus:ring-offset-2 transition duration-300 transform hover:scale-105 text-2xl font-bold min-h-[120px]"
+                            >
+                                {item.name}
+                                {currentVoteData.realtimeResults && (
+                                    <span className="absolute top-2 right-4 text-white text-opacity-75 text-sm">
+                                        {item.votes} 표
+                                    </span>
+                                )}
+                            </button>
+                        ))}
+                    </div>
+                    {currentVoteData.realtimeResults && (
+                        <>
+                            <h4 className="text-2xl font-bold text-gray-800 mb-6">실시간 투표 결과</h4>
+                            <VoteCharts data={currentVoteData.items.map(item => ({ name: item.name, votes: item.votes }))} />
+                        </>
+                    )}
+                    {!currentVoteData.realtimeResults && (
+                        <p className="text-lg text-gray-600 mt-8">
+                            투표 결과는 마감 후 공개됩니다.
+                        </p>
+                    )}
+                    <button
+                        onClick={onGoHome}
+                        className="mt-10 px-8 py-4 bg-gray-600 text-white rounded-lg shadow-xl hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-gray-500 focus:ring-offset-2 transition duration-200 text-xl font-bold"
+                    >
+                        홈으로
+                    </button>
+                </div>
+            )}
+
+            {phase === 'participant' && !currentVoteData && !message && (
+                <div className="text-center text-gray-600 text-xl mt-20">투표 데이터를 로드 중입니다...</div>
+            )}
+        </div>
+    );
+};
+
+// Main App Component
+const App = () => {
+    const [view, setView] = useState('home'); // home, local, share
+
+    // Handle initial URL to route to specific vote if provided
+    useEffect(() => {
+        const pathParts = window.location.pathname.split('/');
+        if (pathParts[1] === 'vote' && pathParts[2]) {
+            setView('share'); // Route to shared vote participant view
+        }
+    }, []);
+
+    const handleGoHome = () => {
+        setView('home');
+        window.history.pushState({}, '', '/'); // Reset URL to home
+    };
+
+    return (
+        <div className="font-inter antialiased bg-gray-100 min-h-screen flex flex-col items-center justify-center">
+            <style>
+                {`
+                @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
+                body {
+                    font-family: 'Inter', sans-serif;
+                }
+                .animate-fade-in-down {
+                    animation: fadeInDown 0.5s ease-out forwards;
+                }
+                @keyframes fadeInDown {
+                    from {
+                        opacity: 0;
+                        transform: translateY(-20px);
+                    }
+                    to {
+                        opacity: 1;
+                        transform: translateY(0);
+                    }
+                }
+                `}
+            </style>
+            {/* QRious CDN for QR code generation */}
+            <script src="https://cdn.jsdelivr.net/npm/qrious@4.0.2/dist/qrious.min.js"></script>
+
+            <header className="w-full bg-white shadow-md py-4 px-6 flex justify-center items-center rounded-b-xl">
+                <button onClick={handleGoHome} className="text-4xl font-extrabold text-blue-700 hover:text-blue-800 transition duration-200 cursor-pointer">
+                    초간단 웹 투표
+                </button>
+            </header>
+
+            <main className="flex-grow flex items-center justify-center w-full p-4">
+                {view === 'home' && (
+                    <div className="flex flex-col items-center justify-center gap-6 p-8 bg-white rounded-xl shadow-lg max-w-lg w-full">
+                        <h1 className="text-3xl font-bold text-gray-800 mb-4">투표 방식 선택</h1>
+                        <button
+                            onClick={() => setView('local')}
+                            className="w-full py-5 bg-indigo-600 text-white rounded-xl shadow-xl hover:bg-indigo-700 focus:outline-none focus:ring-4 focus:ring-indigo-300 focus:ring-offset-2 transition duration-300 text-2xl font-bold transform hover:scale-105"
+                        >
+                            한 기기용 (단말기 공유 투표)
+                        </button>
+                        <button
+                            onClick={() => setView('share')}
+                            className="w-full py-5 bg-teal-600 text-white rounded-xl shadow-xl hover:bg-teal-700 focus:outline-none focus:ring-4 focus:ring-teal-300 focus:ring-offset-2 transition duration-300 text-2xl font-bold transform hover:scale-105"
+                        >
+                            여러 기기용 (링크 공유 투표)
+                        </button>
+                    </div>
+                )}
+
+                {view === 'local' && <LocalVote onGoHome={handleGoHome} />}
+                {view === 'share' && <SharedVote onGoHome={handleGoHome} />}
+            </main>
+        </div>
+    );
+};
+
+export default App;
