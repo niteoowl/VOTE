@@ -7,875 +7,839 @@
     <!-- Tailwind CSS CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- Inter Font -->
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
     <style>
         body {
             font-family: 'Inter', sans-serif;
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
         }
-        .animate-fade-in-down {
-            animation: fadeInDown 0.5s ease-out forwards;
+        /* Custom styles for modal */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.5);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 50;
         }
-        @keyframes fadeInDown {
-            from {
-                opacity: 0;
-                transform: translateY(-20px);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
+        .modal-content {
+            background-color: white;
+            padding: 1.5rem;
+            border-radius: 0.5rem;
+            box-shadow: 0 10px 15px rgba(0, 0, 0, 0.1);
+            max-width: 24rem;
+            width: 100%;
+            text-align: center;
+        }
+        .modal-error-border {
+            border-top: 4px solid #ef4444; /* red-500 */
+        }
+        .modal-info-border {
+            border-top: 4px solid #6366f1; /* indigo-500 */
         }
     </style>
 </head>
-<body class="font-inter antialiased bg-gray-100 min-h-screen flex flex-col items-center justify-center">
-    <!-- QRious CDN for QR code generation -->
-    <script src="https://cdn.jsdelivr.net/npm/qrious@4.0.2/dist/qrious.min.js"></script>
-    <!-- Chart.js CDN for charts -->
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<body class="font-inter antialiased bg-gray-50 text-gray-900 min-h-screen">
+    <div id="app" class="min-h-screen"></div>
 
-    <header class="w-full bg-white shadow-md py-4 px-6 flex justify-center items-center rounded-b-xl">
-        <button id="home-button" class="text-4xl font-extrabold text-blue-700 hover:text-blue-800 transition duration-200 cursor-pointer">
-            초간단 웹 투표
-        </button>
-    </header>
-
-    <main id="app-main" class="flex-grow flex items-center justify-center w-full p-4">
-        <!-- Content will be dynamically loaded here -->
-    </main>
-
+    <!-- Firebase SDKs -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, getDoc, addDoc, setDoc, updateDoc, onSnapshot, collection } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, doc, getDoc, addDoc, setDoc, updateDoc, onSnapshot, collection, query, where, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        // Global variables for Firebase config and app ID, provided by the environment
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        // Firebase configuration and app ID are provided by the Canvas environment
         const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
         const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
         // Initialize Firebase
         let app;
         let db;
         let auth;
-        let unsubscribeFromVote = null; // To store the unsubscribe function for Firestore listener
+        let unsubscribePollSnapshot = null; // To store the unsubscribe function for multi-device poll
 
         try {
             app = initializeApp(firebaseConfig);
             db = getFirestore(app);
             auth = getAuth(app);
         } catch (error) {
-            console.error("Firebase initialization error:", error);
+            console.error("Firebase initialization failed:", error);
+            showCustomModal("Firebase 초기화에 실패했습니다.", "error");
         }
 
-        // Application State
+        // Global state for the application
         const appState = {
-            view: 'home', // home, local, share
-            localVote: {
-                phase: 'setup', // setup, voting, results
-                title: '',
-                items: [], // { id, name, votes }
-                newItemName: '',
-                votedCount: 0,
-            },
-            sharedVote: {
-                phase: 'setup', // setup, created, participant
-                title: '',
-                items: [], // { id, name } for creation, { id, name, votes } for participant
-                newItemName: '',
-                voteId: '',
-                currentVoteData: null, // { title, items: [{id, name, votes}], realtimeResults }
-                realtimeResults: true,
-            },
-            userId: null,
+            currentView: 'home', // 'home', 'singleDeviceCreate', 'singleDeviceVote', 'singleDeviceResults', 'multiDeviceCreate', 'multiDeviceShare', 'multiDeviceVote', 'multiDeviceResults'
+            pollTitle: '',
+            pollOptions: ['', ''],
+            isMultiSelect: false,
+            voterCount: 1,
+            currentVoterIndex: 0,
+            singleDeviceVotes: [], // For single device, store votes as array of arrays
+            singleDevicePollResults: {}, // For single device, calculated results
+            activePollId: null, // For multi-device polls
+            multiDevicePollData: null, // Data for the active multi-device poll
+            multiDevicePollResults: {}, // Results for multi-device poll
             isAuthReady: false,
-            message: '',
-            messageTimeout: null,
-        };
-
-        // Utility function to generate a unique ID
-        const generateUniqueId = () => {
-            return Math.random().toString(36).substring(2, 9);
-        };
-
-        // Function to show a temporary message
-        const showMessage = (msg, duration = 2000) => {
-            appState.message = msg;
-            renderMessage();
-            if (appState.messageTimeout) {
-                clearTimeout(appState.messageTimeout);
-            }
-            appState.messageTimeout = setTimeout(() => {
-                appState.message = '';
-                renderMessage();
-            }, duration);
-        };
-
-        // Render Message Display
-        const renderMessage = () => {
-            let messageDiv = document.getElementById('message-display');
-            if (!messageDiv) {
-                messageDiv = document.createElement('div');
-                messageDiv.id = 'message-display';
-                messageDiv.className = 'fixed top-20 bg-blue-500 text-white px-6 py-3 rounded-full shadow-lg z-50 animate-fade-in-down';
-                document.body.appendChild(messageDiv);
-            }
-            if (appState.message) {
-                messageDiv.textContent = appState.message;
-                messageDiv.style.display = 'block';
-            } else {
-                messageDiv.style.display = 'none';
+            userId: null,
+            showResultsAfterClose: false,
+            pollClosed: false,
+            qrCodeUrl: null,
+            modal: {
+                show: false,
+                message: '',
+                type: 'info' // 'info', 'error'
             }
         };
 
-        // Render Chart Component (using Chart.js)
-        const renderCharts = (data, containerId) => {
-            const container = document.getElementById(containerId);
-            if (!container) return;
+        // --- Utility Functions ---
+        function showCustomModal(message, type = 'info') {
+            appState.modal.message = message;
+            appState.modal.type = type;
+            appState.modal.show = true;
+            renderModal();
+        }
 
-            container.innerHTML = `
-                <div class="flex flex-col md:flex-row justify-center items-center gap-8 w-full">
-                    <!-- Bar Chart -->
-                    <div class="w-full md:w-1/2 h-80 bg-white p-4 rounded-xl shadow-lg">
-                        <h3 class="text-lg font-semibold mb-2 text-gray-800">막대 그래프</h3>
-                        <canvas id="barChartCanvas" class="w-full h-full"></canvas>
-                    </div>
+        function closeModal() {
+            appState.modal.show = false;
+            appState.modal.message = '';
+            appState.modal.type = 'info';
+            renderModal();
+        }
 
-                    <!-- Pie Chart (Doughnut) -->
-                    <div class="w-full md:w-1/2 h-80 bg-white p-4 rounded-xl shadow-lg">
-                        <h3 class="text-lg font-semibold mb-2 text-gray-800">도넛형 차트</h3>
-                        <canvas id="pieChartCanvas" class="w-full h-full"></canvas>
-                    </div>
-                </div>
-            `;
-
-            const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#AF19FF', '#FF19A3', '#19FFD6', '#A3FF19'];
-            const labels = data.map(item => item.name);
-            const votes = data.map(item => item.votes);
-
-            // Bar Chart
-            const barCtx = document.getElementById('barChartCanvas').getContext('2d');
-            if (window.barChartInstance) {
-                window.barChartInstance.destroy();
-            }
-            window.barChartInstance = new Chart(barCtx, {
-                type: 'bar',
-                data: {
-                    labels: labels,
-                    datasets: [{
-                        label: '투표 수',
-                        data: votes,
-                        backgroundColor: COLORS.slice(0, data.length),
-                        borderRadius: 10,
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    scales: {
-                        y: {
-                            beginAtZero: true,
-                            ticks: {
-                                precision: 0
-                            }
-                        }
-                    },
-                    plugins: {
-                        legend: {
-                            display: false // Hide default legend as we have custom colors per bar
-                        },
-                        tooltip: {
-                            callbacks: {
-                                label: function(context) {
-                                    let label = context.dataset.label || '';
-                                    if (label) {
-                                        label += ': ';
-                                    }
-                                    if (context.parsed.y !== null) {
-                                        label += context.parsed.y + ' 표';
-                                    }
-                                    return label;
-                                }
-                            }
-                        }
-                    }
+        function renderModal() {
+            const modalOverlay = document.getElementById('modal-overlay');
+            if (appState.modal.show) {
+                if (!modalOverlay) {
+                    const overlay = document.createElement('div');
+                    overlay.id = 'modal-overlay';
+                    overlay.className = 'modal-overlay';
+                    document.body.appendChild(overlay);
                 }
-            });
-
-            // Pie Chart
-            const pieCtx = document.getElementById('pieChartCanvas').getContext('2d');
-            if (window.pieChartInstance) {
-                window.pieChartInstance.destroy();
-            }
-            window.pieChartInstance = new Chart(pieCtx, {
-                type: 'doughnut',
-                data: {
-                    labels: labels,
-                    datasets: [{
-                        data: votes,
-                        backgroundColor: COLORS.slice(0, data.length),
-                        borderColor: '#fff',
-                        borderWidth: 2,
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: {
-                        legend: {
-                            position: 'bottom',
-                        },
-                        tooltip: {
-                            callbacks: {
-                                label: function(context) {
-                                    let label = context.label || '';
-                                    if (label) {
-                                        label += ': ';
-                                    }
-                                    if (context.parsed !== null) {
-                                        const total = context.dataset.data.reduce((acc, val) => acc + val, 0);
-                                        const percentage = (context.parsed / total * 100).toFixed(0);
-                                        label += `${context.parsed} 표 (${percentage}%)`;
-                                    }
-                                    return label;
-                                }
-                            }
-                        }
-                    }
-                }
-            });
-        };
-
-        // Render Home View
-        const renderHomePage = () => {
-            const main = document.getElementById('app-main');
-            main.innerHTML = `
-                <div class="flex flex-col items-center justify-center gap-6 p-8 bg-white rounded-xl shadow-lg max-w-lg w-full">
-                    <h1 class="text-3xl font-bold text-gray-800 mb-4">투표 방식 선택</h1>
-                    <button id="local-vote-btn" class="w-full py-5 bg-indigo-600 text-white rounded-xl shadow-xl hover:bg-indigo-700 focus:outline-none focus:ring-4 focus:ring-indigo-300 focus:ring-offset-2 transition duration-300 text-2xl font-bold transform hover:scale-105">
-                        한 기기용 (단말기 공유 투표)
-                    </button>
-                    <button id="share-vote-btn" class="w-full py-5 bg-teal-600 text-white rounded-xl shadow-xl hover:bg-teal-700 focus:outline-none focus:ring-4 focus:ring-teal-300 focus:ring-offset-2 transition duration-300 text-2xl font-bold transform hover:scale-105">
-                        여러 기기용 (링크 공유 투표)
-                    </button>
-                </div>
-            `;
-
-            document.getElementById('local-vote-btn').addEventListener('click', () => {
-                appState.view = 'local';
-                appState.localVote = { phase: 'setup', title: '', items: [], newItemName: '', votedCount: 0 }; // Reset local vote state
-                renderApp();
-            });
-            document.getElementById('share-vote-btn').addEventListener('click', () => {
-                appState.view = 'share';
-                appState.sharedVote = { phase: 'setup', title: '', items: [], newItemName: '', voteId: '', currentVoteData: null, realtimeResults: true }; // Reset shared vote state
-                renderApp();
-            });
-        };
-
-        // Render Local Vote Setup Phase
-        const renderLocalVoteSetup = () => {
-            const main = document.getElementById('app-main');
-            main.innerHTML = `
-                <div class="flex flex-col items-center p-4 bg-gray-50 min-h-screen w-full">
-                    <h2 class="text-3xl font-bold text-gray-800 mb-8 mt-4">한 기기용 (단말기 공유 투표)</h2>
-                    <div class="w-full max-w-2xl bg-white p-8 rounded-xl shadow-lg">
-                        <div class="mb-6">
-                            <label for="vote-title" class="block text-gray-700 text-lg font-semibold mb-2">투표 제목:</label>
-                            <input
-                                id="vote-title"
-                                type="text"
-                                class="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition duration-200"
-                                placeholder="예: 급식 메뉴 투표"
-                                value="${appState.localVote.title}"
-                            />
-                        </div>
-                        <div class="mb-6">
-                            <label for="new-item" class="block text-gray-700 text-lg font-semibold mb-2">투표 항목 추가:</label>
-                            <div class="flex gap-2">
-                                <input
-                                    id="new-item"
-                                    type="text"
-                                    class="flex-grow p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition duration-200"
-                                    placeholder="예: 돈까스"
-                                    value="${appState.localVote.newItemName}"
-                                />
-                                <button id="add-item-btn" class="px-5 py-3 bg-blue-600 text-white rounded-lg shadow-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition duration-200 text-lg font-medium">
-                                    추가
-                                </button>
-                            </div>
-                        </div>
-                        <div id="items-list-container" class="mb-6">
-                            <!-- Items will be rendered here -->
-                        </div>
-                        <button id="start-vote-btn" class="w-full py-4 bg-green-600 text-white rounded-lg shadow-xl hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 transition duration-200 text-xl font-bold">
-                            투표 시작
+                const currentOverlay = document.getElementById('modal-overlay');
+                currentOverlay.innerHTML = `
+                    <div class="modal-content ${appState.modal.type === 'error' ? 'modal-error-border' : 'modal-info-border'}">
+                        <h3 class="text-xl font-bold mb-4">
+                            ${appState.modal.type === 'error' ? '오류 발생' : '알림'}
+                        </h3>
+                        <p class="text-gray-700 mb-6">${appState.modal.message}</p>
+                        <button id="modal-close-button" class="w-full py-2 px-4 rounded-lg font-semibold transition-colors duration-200 ${appState.modal.type === 'error' ? 'bg-red-500 hover:bg-red-600 text-white' : 'bg-indigo-500 hover:bg-indigo-600 text-white'}">
+                            확인
                         </button>
                     </div>
-                </div>
-            `;
-
-            const titleInput = document.getElementById('vote-title');
-            titleInput.addEventListener('input', (e) => {
-                appState.localVote.title = e.target.value;
-            });
-
-            const newItemInput = document.getElementById('new-item');
-            newItemInput.addEventListener('input', (e) => {
-                appState.localVote.newItemName = e.target.value;
-            });
-            newItemInput.addEventListener('keypress', (e) => {
-                if (e.key === 'Enter') handleLocalAddItem();
-            });
-
-            document.getElementById('add-item-btn').addEventListener('click', handleLocalAddItem);
-            document.getElementById('start-vote-btn').addEventListener('click', handleLocalStartVote);
-
-            renderLocalItemsList();
-        };
-
-        const renderLocalItemsList = () => {
-            const itemsListContainer = document.getElementById('items-list-container');
-            if (!itemsListContainer) return;
-
-            if (appState.localVote.items.length > 0) {
-                let itemsHtml = `
-                    <h3 class="text-gray-700 text-lg font-semibold mb-3">현재 항목:</h3>
-                    <ul class="space-y-2">
                 `;
-                appState.localVote.items.forEach(item => {
-                    itemsHtml += `
-                        <li class="flex justify-between items-center bg-gray-100 p-3 rounded-lg shadow-sm">
-                            <span class="text-gray-800 text-base">${item.name}</span>
-                            <button data-id="${item.id}" class="remove-item-btn ml-4 text-red-500 hover:text-red-700 transition duration-200" aria-label="Remove ${item.name}">
-                                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                                    <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
-                                </svg>
+                document.getElementById('modal-close-button').onclick = closeModal;
+            } else {
+                if (modalOverlay) {
+                    modalOverlay.remove();
+                }
+            }
+        }
+
+        function handleAddOption() {
+            appState.pollOptions.push('');
+            renderPollCreationForm(appState.currentView === 'singleDeviceCreate' ? 'single' : 'multi');
+        }
+
+        function handleOptionChange(index, value) {
+            appState.pollOptions[index] = value;
+        }
+
+        function handleRemoveOption(index) {
+            appState.pollOptions.splice(index, 1);
+            renderPollCreationForm(appState.currentView === 'singleDeviceCreate' ? 'single' : 'multi');
+        }
+
+        // --- Single-Device Poll Logic ---
+        function startSingleDevicePoll() {
+            if (!appState.pollTitle.trim() || appState.pollOptions.some(opt => !opt.trim())) {
+                showCustomModal("투표 제목과 모든 항목을 입력해주세요.");
+                return;
+            }
+            appState.singleDeviceVotes = Array(appState.voterCount).fill([]);
+            appState.currentVoterIndex = 0;
+            navigateTo('singleDeviceVote');
+        }
+
+        function handleSingleDeviceVote(optionIndex) {
+            const newVotes = [...appState.singleDeviceVotes];
+            if (appState.isMultiSelect) {
+                if (newVotes[appState.currentVoterIndex].includes(optionIndex)) {
+                    newVotes[appState.currentVoterIndex] = newVotes[appState.currentVoterIndex].filter(item => item !== optionIndex);
+                } else {
+                    newVotes[appState.currentVoterIndex] = [...newVotes[appState.currentVoterIndex], optionIndex];
+                }
+            } else {
+                newVotes[appState.currentVoterIndex] = [optionIndex];
+            }
+            appState.singleDeviceVotes = newVotes;
+            renderSingleDeviceVoteView(); // Re-render to show selection
+        }
+
+        function submitSingleDeviceVoteAndNext() {
+            if (appState.currentVoterIndex < appState.voterCount - 1) {
+                appState.currentVoterIndex++;
+                showCustomModal("다음 사람 투표하세요!");
+                renderSingleDeviceVoteView();
+            } else {
+                calculateSingleDeviceResults();
+                navigateTo('singleDeviceResults');
+            }
+        }
+
+        function calculateSingleDeviceResults() {
+            const results = {};
+            appState.pollOptions.forEach((_, index) => {
+                results[index] = 0;
+            });
+
+            appState.singleDeviceVotes.forEach(voterSelections => {
+                voterSelections.forEach(optionIndex => {
+                    results[optionIndex]++;
+                });
+            });
+            appState.singleDevicePollResults = results;
+        }
+
+        // --- Multi-Device Poll Logic ---
+        function generatePollId() {
+            return Math.random().toString(36).substring(2, 8); // Simple 6-character ID
+        }
+
+        async function createMultiDevicePoll() {
+            if (!appState.pollTitle.trim() || appState.pollOptions.some(opt => !opt.trim())) {
+                showCustomModal("투표 제목과 모든 항목을 입력해주세요.");
+                return;
+            }
+
+            if (!appState.isAuthReady || !appState.userId) {
+                showCustomModal("인증 준비 중입니다. 잠시 후 다시 시도해주세요.", "error");
+                return;
+            }
+
+            const newPollId = generatePollId();
+            const pollRef = doc(db, `artifacts/${appId}/public/data/polls`, newPollId);
+            const pollData = {
+                title: appState.pollTitle,
+                options: appState.pollOptions,
+                isMultiSelect: appState.isMultiSelect,
+                creatorId: appState.userId,
+                createdAt: new Date().toISOString(),
+                votes: {}, // Stores votes as { userId: [optionIndex, ...], ... }
+                closed: false,
+                showResultsAfterClose: appState.showResultsAfterClose,
+            };
+
+            try {
+                await setDoc(pollRef, pollData);
+                appState.activePollId = newPollId;
+                appState.multiDevicePollData = pollData;
+                appState.qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${encodeURIComponent(window.location.origin + '/share/' + newPollId)}`;
+                navigateTo('multiDeviceShare');
+            } catch (e) {
+                console.error("Error creating multi-device poll:", e);
+                showCustomModal("투표 생성에 실패했습니다.", "error");
+            }
+        }
+
+        async function fetchMultiDevicePoll(pollId) {
+            if (!db) return;
+            // Unsubscribe from previous listener if exists
+            if (unsubscribePollSnapshot) {
+                unsubscribePollSnapshot();
+            }
+
+            const pollDocRef = doc(db, `artifacts/${appId}/public/data/polls`, pollId);
+            unsubscribePollSnapshot = onSnapshot(pollDocRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    appState.multiDevicePollData = data;
+                    appState.pollTitle = data.title;
+                    appState.pollOptions = data.options;
+                    appState.isMultiSelect = data.isMultiSelect;
+                    appState.showResultsAfterClose = data.showResultsAfterClose;
+                    appState.pollClosed = data.closed || false;
+                    if (data.votes) {
+                        calculateMultiDeviceResults(data.votes, data.options);
+                    }
+                    if (appState.currentView === 'multiDeviceVote') {
+                        renderMultiDeviceVoteView();
+                    } else if (appState.currentView === 'multiDeviceResults') {
+                        renderResultsView(appState.multiDevicePollResults, appState.multiDevicePollData.options, appState.multiDevicePollData.title, 'multi');
+                    }
+                } else {
+                    showCustomModal("투표를 찾을 수 없습니다.", "error");
+                    navigateTo('home');
+                }
+            }, (error) => {
+                console.error("Error fetching multi-device poll:", error);
+                showCustomModal("투표 데이터를 가져오는 데 실패했습니다.", "error");
+                navigateTo('home');
+            });
+        }
+
+        async function handleMultiDeviceVote(optionIndex) {
+            if (!appState.activePollId || !appState.userId || !appState.multiDevicePollData || appState.pollClosed) {
+                showCustomModal(appState.pollClosed ? "이 투표는 마감되었습니다." : "투표를 할 수 없습니다.", "error");
+                return;
+            }
+
+            const pollRef = doc(db, `artifacts/${appId}/public/data/polls`, appState.activePollId);
+            let newVotes = { ...appState.multiDevicePollData.votes };
+            let userVotes = newVotes[appState.userId] || [];
+
+            if (appState.multiDevicePollData.isMultiSelect) {
+                if (userVotes.includes(optionIndex)) {
+                    userVotes = userVotes.filter(item => item !== optionIndex);
+                } else {
+                    userVotes = [...userVotes, optionIndex];
+                }
+            } else {
+                userVotes = [optionIndex]; // For single select, always replace
+            }
+            newVotes[appState.userId] = userVotes;
+
+            try {
+                await updateDoc(pollRef, { votes: newVotes });
+                // The onSnapshot listener will update multiDevicePollData and recalculate results
+            } catch (e) {
+                console.error("Error submitting multi-device vote:", e);
+                showCustomModal("투표 제출에 실패했습니다.", "error");
+            }
+        }
+
+        function calculateMultiDeviceResults(votes, options) {
+            const results = {};
+            options.forEach((_, index) => {
+                results[index] = 0;
+            });
+
+            Object.values(votes).forEach(userSelections => {
+                userSelections.forEach(optionIndex => {
+                    results[optionIndex]++;
+                });
+            });
+            appState.multiDevicePollResults = results;
+        }
+
+        async function closeMultiDevicePoll() {
+            if (!appState.activePollId || !appState.multiDevicePollData || appState.multiDevicePollData.creatorId !== appState.userId) {
+                showCustomModal("투표를 마감할 권한이 없습니다.", "error");
+                return;
+            }
+            const pollRef = doc(db, `artifacts/${appId}/public/data/polls`, appState.activePollId);
+            try {
+                await updateDoc(pollRef, { closed: true });
+                showCustomModal("투표가 마감되었습니다.");
+            } catch (e) {
+                console.error("Error closing poll:", e);
+                showCustomModal("투표 마감에 실패했습니다.", "error");
+            }
+        }
+
+        function resetPollCreation() {
+            appState.pollTitle = '';
+            appState.pollOptions = ['', ''];
+            appState.isMultiSelect = false;
+            appState.voterCount = 1;
+            appState.showResultsAfterClose = false;
+            appState.activePollId = null;
+            appState.multiDevicePollData = null;
+            appState.multiDevicePollResults = {};
+            appState.currentVoterIndex = 0;
+            appState.singleDeviceVotes = [];
+            appState.singleDevicePollResults = {};
+            appState.pollClosed = false;
+            appState.qrCodeUrl = null;
+            if (unsubscribePollSnapshot) {
+                unsubscribePollSnapshot();
+                unsubscribePollSnapshot = null;
+            }
+        }
+
+        function navigateTo(view) {
+            resetPollCreation();
+            appState.currentView = view;
+            if (view === 'home') {
+                window.history.pushState({}, '', '/');
+            } else if (view === 'multiDeviceCreate') {
+                window.history.pushState({}, '', '/share');
+            }
+            renderApp();
+        }
+
+        // --- Render Functions for different views ---
+        function renderHomeView() {
+            const appDiv = document.getElementById('app');
+            appDiv.innerHTML = `
+                <div class="flex flex-col items-center justify-center h-full p-4 min-h-screen">
+                    <h1 class="text-4xl font-bold mb-8 text-gray-800">초간단 웹 투표</h1>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-8 w-full max-w-4xl">
+                        <div class="bg-white p-8 rounded-xl shadow-lg border border-gray-200 hover:shadow-xl transition-shadow duration-300">
+                            <h2 class="text-2xl font-semibold mb-4 text-gray-700">한 기기용 (단말기 공유 투표)</h2>
+                            <p class="text-gray-600 mb-6">
+                                별도 기기 없이 하나의 태블릿, 노트북으로 여러 명이 순서대로 투표할 수 있습니다. 교실, 회의, 소규모 모임에 최적화되어 있습니다.
+                            </p>
+                            <button id="single-device-create-btn"
+                                class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-6 rounded-lg shadow-md transition-colors duration-300 transform hover:scale-105">
+                                시작하기
                             </button>
-                        </li>
-                    `;
-                });
-                itemsHtml += `</ul>`;
-                itemsListContainer.innerHTML = itemsHtml;
-
-                document.querySelectorAll('.remove-item-btn').forEach(button => {
-                    button.addEventListener('click', (e) => {
-                        handleLocalRemoveItem(e.currentTarget.dataset.id);
-                    });
-                });
-            } else {
-                itemsListContainer.innerHTML = '';
-            }
-        };
-
-        const handleLocalAddItem = () => {
-            if (appState.localVote.newItemName.trim()) {
-                appState.localVote.items.push({ id: generateUniqueId(), name: appState.localVote.newItemName.trim(), votes: 0 });
-                appState.localVote.newItemName = '';
-                renderLocalItemsList(); // Re-render only the items list
-                document.getElementById('new-item').value = ''; // Clear input field
-            }
-        };
-
-        const handleLocalRemoveItem = (idToRemove) => {
-            appState.localVote.items = appState.localVote.items.filter(item => item.id !== idToRemove);
-            renderLocalItemsList(); // Re-render only the items list
-        };
-
-        const handleLocalStartVote = () => {
-            if (appState.localVote.title.trim() && appState.localVote.items.length > 0) {
-                appState.localVote.phase = 'voting';
-                showMessage('투표를 시작합니다! 첫 번째 분이 투표하세요.');
-                renderApp();
-            } else {
-                showMessage('투표 제목과 항목을 입력해주세요.');
-            }
-        };
-
-        // Render Local Vote Voting Phase
-        const renderLocalVoteVoting = () => {
-            const main = document.getElementById('app-main');
-            main.innerHTML = `
-                <div class="flex flex-col items-center p-4 bg-gray-50 min-h-screen w-full">
-                    <h2 class="text-4xl font-extrabold text-blue-700 mb-8">${appState.localVote.title}</h2>
-                    <p class="text-xl text-gray-600 mb-6">총 투표 수: <span id="voted-count">${appState.localVote.votedCount}</span>명</p>
-                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6 w-full max-w-4xl" id="vote-items-container">
-                        <!-- Vote buttons will be rendered here -->
+                        </div>
+                        <div class="bg-white p-8 rounded-xl shadow-lg border border-gray-200 hover:shadow-xl transition-shadow duration-300">
+                            <h2 class="text-2xl font-semibold mb-4 text-gray-700">여러 기기용 (링크 공유 투표)</h2>
+                            <p class="text-gray-600 mb-6">
+                                QR 코드 또는 링크 공유를 통해 각자 스마트폰으로 간편하게 투표에 참여할 수 있습니다. 실시간 결과 확인도 가능합니다.
+                            </p>
+                            <button id="multi-device-create-btn"
+                                class="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-6 rounded-lg shadow-md transition-colors duration-300 transform hover:scale-105">
+                                시작하기
+                            </button>
+                        </div>
                     </div>
-                    <button id="show-results-btn" class="mt-10 px-8 py-4 bg-purple-600 text-white rounded-lg shadow-xl hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2 transition duration-200 text-xl font-bold">
-                        결과 보기
-                    </button>
+                    ${appState.userId ? `
+                    <p class="mt-8 text-sm text-gray-500">
+                        현재 사용자 ID: <span class="font-mono bg-gray-100 px-2 py-1 rounded">${appState.userId}</span>
+                    </p>
+                    ` : ''}
                 </div>
             `;
+            document.getElementById('single-device-create-btn').onclick = () => navigateTo('singleDeviceCreate');
+            document.getElementById('multi-device-create-btn').onclick = () => navigateTo('multiDeviceCreate');
+        }
 
-            const voteItemsContainer = document.getElementById('vote-items-container');
-            appState.localVote.items.forEach(item => {
-                const button = document.createElement('button');
-                button.className = 'relative flex items-center justify-center p-6 bg-blue-500 text-white rounded-xl shadow-lg hover:bg-blue-600 focus:outline-none focus:ring-4 focus:ring-blue-300 focus:ring-offset-2 transition duration-300 transform hover:scale-105 text-2xl font-bold min-h-[120px]';
-                button.dataset.id = item.id;
-                button.innerHTML = `
-                    ${item.name}
-                    <span class="absolute top-2 right-4 text-white text-opacity-75 text-sm">
-                        ${item.votes} 표
-                    </span>
-                `;
-                button.addEventListener('click', () => handleLocalVote(item.id));
-                voteItemsContainer.appendChild(button);
-            });
+        function renderPollCreationForm(type) {
+            const appDiv = document.getElementById('app');
+            appDiv.innerHTML = `
+                <div class="flex flex-col items-center p-4 bg-gray-50 min-h-screen">
+                    <div class="bg-white p-8 rounded-xl shadow-lg w-full max-w-2xl mt-8">
+                        <h2 class="text-3xl font-bold mb-6 text-gray-800 text-center">
+                            ${type === 'single' ? '한 기기용 투표 생성' : '여러 기기용 투표 생성'}
+                        </h2>
 
-            document.getElementById('show-results-btn').addEventListener('click', handleLocalShowResults);
-        };
-
-        const handleLocalVote = (id) => {
-            appState.localVote.items = appState.localVote.items.map(item =>
-                item.id === id ? { ...item, votes: item.votes + 1 } : item
-            );
-            appState.localVote.votedCount++;
-            showMessage('다음 사람이 투표하세요!');
-            // Re-render voting phase to update vote counts
-            renderLocalVoteVoting();
-        };
-
-        const handleLocalShowResults = () => {
-            appState.localVote.phase = 'results';
-            renderApp();
-        };
-
-        // Render Local Vote Results Phase
-        const renderLocalVoteResults = () => {
-            const main = document.getElementById('app-main');
-            main.innerHTML = `
-                <div class="flex flex-col items-center p-4 bg-gray-50 min-h-screen w-full">
-                    <h3 class="text-4xl font-extrabold text-blue-700 mb-8">${appState.localVote.title} - 결과</h3>
-                    <div id="local-charts-container" class="w-full max-w-5xl">
-                        <!-- Charts will be rendered here -->
-                    </div>
-                    <div class="flex flex-col sm:flex-row justify-center gap-4 mt-10">
-                        <button id="reset-local-btn" class="px-8 py-4 bg-red-600 text-white rounded-lg shadow-xl hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 transition duration-200 text-xl font-bold">
-                            다시하기
-                        </button>
-                        <button id="home-from-local-results-btn" class="px-8 py-4 bg-gray-600 text-white rounded-lg shadow-xl hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-gray-500 focus:ring-offset-2 transition duration-200 text-xl font-bold">
-                            홈으로
-                        </button>
-                    </div>
-                </div>
-            `;
-            renderCharts(appState.localVote.items, 'local-charts-container');
-
-            document.getElementById('reset-local-btn').addEventListener('click', handleLocalReset);
-            document.getElementById('home-from-local-results-btn').addEventListener('click', handleGoHome);
-        };
-
-        const handleLocalReset = () => {
-            appState.localVote = { phase: 'setup', title: '', items: [], newItemName: '', votedCount: 0 };
-            renderApp();
-        };
-
-        // Render Shared Vote Setup Phase
-        const renderSharedVoteSetup = () => {
-            const main = document.getElementById('app-main');
-            main.innerHTML = `
-                <div class="flex flex-col items-center p-4 bg-gray-50 min-h-screen w-full">
-                    <h2 class="text-3xl font-bold text-gray-800 mb-8 mt-4">여러 기기용 (링크 공유 투표)</h2>
-                    <div class="w-full max-w-2xl bg-white p-8 rounded-xl shadow-lg">
                         <div class="mb-6">
-                            <label for="vote-title" class="block text-gray-700 text-lg font-semibold mb-2">투표 제목:</label>
+                            <label for="poll-title" class="block text-lg font-medium text-gray-700 mb-2">투표 제목</label>
                             <input
-                                id="vote-title"
                                 type="text"
-                                class="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition duration-200"
-                                placeholder="예: 우리 반 반장 선거"
-                                value="${appState.sharedVote.title}"
+                                id="poll-title"
+                                value="${appState.pollTitle}"
+                                placeholder="예: 오늘 점심 메뉴는?"
+                                class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 text-lg"
                             />
                         </div>
+
                         <div class="mb-6">
-                            <label for="new-item" class="block text-gray-700 text-lg font-semibold mb-2">투표 항목 추가:</label>
-                            <div class="flex gap-2">
-                                <input
-                                    id="new-item"
-                                    type="text"
-                                    class="flex-grow p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition duration-200"
-                                    placeholder="예: 김철수"
-                                    value="${appState.sharedVote.newItemName}"
-                                />
-                                <button id="add-item-btn" class="px-5 py-3 bg-blue-600 text-white rounded-lg shadow-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition duration-200 text-lg font-medium">
-                                    추가
-                                </button>
+                            <label class="block text-lg font-medium text-gray-700 mb-2">투표 항목</label>
+                            <div id="poll-options-container">
+                                ${appState.pollOptions.map((option, index) => `
+                                <div class="flex items-center mb-3">
+                                    <input
+                                        type="text"
+                                        value="${option}"
+                                        data-index="${index}"
+                                        placeholder="항목 ${index + 1}"
+                                        class="flex-grow px-4 py-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 text-lg mr-2 option-input"
+                                    />
+                                    ${appState.pollOptions.length > 2 ? `
+                                    <button
+                                        data-index="${index}"
+                                        class="bg-red-500 hover:bg-red-600 text-white p-3 rounded-lg text-xl remove-option-btn"
+                                        aria-label="Remove option ${index + 1}"
+                                    >
+                                        &times;
+                                    </button>
+                                    ` : ''}
+                                </div>
+                                `).join('')}
                             </div>
+                            <button id="add-option-btn"
+                                class="w-full bg-gray-200 hover:bg-gray-300 text-gray-800 font-semibold py-3 rounded-lg transition-colors duration-200">
+                                항목 추가
+                            </button>
                         </div>
-                        <div id="items-list-container" class="mb-6">
-                            <!-- Items will be rendered here -->
-                        </div>
+
                         <div class="mb-6 flex items-center">
                             <input
                                 type="checkbox"
-                                id="realtime-results"
-                                ${appState.sharedVote.realtimeResults ? 'checked' : ''}
-                                class="h-5 w-5 text-blue-600 rounded focus:ring-blue-500"
+                                id="multi-select"
+                                ${appState.isMultiSelect ? 'checked' : ''}
+                                class="h-5 w-5 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500"
                             />
-                            <label for="realtime-results" class="ml-2 text-gray-700 text-lg font-semibold">실시간 결과 공개</label>
+                            <label for="multi-select" class="ml-3 text-lg font-medium text-gray-700">복수 선택 허용</label>
                         </div>
-                        <button id="create-vote-btn" class="w-full py-4 bg-green-600 text-white rounded-lg shadow-xl hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 transition duration-200 text-xl font-bold">
-                            투표 링크 생성
+
+                        ${type === 'single' ? `
+                        <div class="mb-6">
+                            <label for="voter-count" class="block text-lg font-medium text-gray-700 mb-2">투표 인원</label>
+                            <input
+                                type="number"
+                                id="voter-count"
+                                value="${appState.voterCount}"
+                                min="1"
+                                class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 text-lg"
+                            />
+                        </div>
+                        ` : ''}
+
+                        ${type === 'multi' ? `
+                        <div class="mb-6 flex items-center">
+                            <input
+                                type="checkbox"
+                                id="show-results-after-close"
+                                ${appState.showResultsAfterClose ? 'checked' : ''}
+                                class="h-5 w-5 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500"
+                            />
+                            <label for="show-results-after-close" class="ml-3 text-lg font-medium text-gray-700">
+                                투표 마감 후 결과 공개
+                            </label>
+                        </div>
+                        ` : ''}
+
+                        <button id="create-poll-btn"
+                            class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-4 px-6 rounded-lg shadow-md transition-colors duration-300 transform hover:scale-105 text-xl">
+                            투표 시작
+                        </button>
+                        <button id="back-to-home-btn"
+                            class="w-full mt-4 bg-gray-300 hover:bg-gray-400 text-gray-800 font-bold py-3 px-6 rounded-lg transition-colors duration-300">
+                            홈으로 돌아가기
                         </button>
                     </div>
                 </div>
             `;
 
-            const titleInput = document.getElementById('vote-title');
-            titleInput.addEventListener('input', (e) => {
-                appState.sharedVote.title = e.target.value;
+            // Attach event listeners
+            document.getElementById('poll-title').oninput = (e) => appState.pollTitle = e.target.value;
+            document.getElementById('add-option-btn').onclick = handleAddOption;
+            document.getElementById('multi-select').onchange = (e) => appState.isMultiSelect = e.target.checked;
+
+            document.querySelectorAll('.option-input').forEach(input => {
+                input.oninput = (e) => handleOptionChange(parseInt(e.target.dataset.index), e.target.value);
+            });
+            document.querySelectorAll('.remove-option-btn').forEach(button => {
+                button.onclick = (e) => handleRemoveOption(parseInt(e.target.dataset.index));
             });
 
-            const newItemInput = document.getElementById('new-item');
-            newItemInput.addEventListener('input', (e) => {
-                appState.sharedVote.newItemName = e.target.value;
-            });
-            newItemInput.addEventListener('keypress', (e) => {
-                if (e.key === 'Enter') handleSharedAddItem();
-            });
+            if (type === 'single') {
+                document.getElementById('voter-count').oninput = (e) => appState.voterCount = Math.max(1, parseInt(e.target.value) || 1);
+                document.getElementById('create-poll-btn').onclick = startSingleDevicePoll;
+            } else { // multi
+                document.getElementById('show-results-after-close').onchange = (e) => appState.showResultsAfterClose = e.target.checked;
+                document.getElementById('create-poll-btn').onclick = createMultiDevicePoll;
+            }
+            document.getElementById('back-to-home-btn').onclick = () => navigateTo('home');
+        }
 
-            document.getElementById('add-item-btn').addEventListener('click', handleSharedAddItem);
-            document.getElementById('realtime-results').addEventListener('change', (e) => {
-                appState.sharedVote.realtimeResults = e.target.checked;
-            });
-            document.getElementById('create-vote-btn').addEventListener('click', handleCreateSharedVote);
+        function renderSingleDeviceVoteView() {
+            const appDiv = document.getElementById('app');
+            const currentVoterVotes = appState.singleDeviceVotes[appState.currentVoterIndex] || [];
+            appDiv.innerHTML = `
+                <div class="flex flex-col items-center p-4 bg-gray-50 min-h-screen">
+                    <div class="bg-white p-8 rounded-xl shadow-lg w-full max-w-xl mt-8 text-center">
+                        <h2 class="text-3xl font-bold mb-4 text-gray-800">${appState.pollTitle}</h2>
+                        <p class="text-xl text-gray-600 mb-6">
+                            <span class="font-semibold text-indigo-600">${appState.currentVoterIndex + 1}번째</span> 투표자
+                        </p>
 
-            renderSharedItemsList();
-        };
-
-        const renderSharedItemsList = () => {
-            const itemsListContainer = document.getElementById('items-list-container');
-            if (!itemsListContainer) return;
-
-            if (appState.sharedVote.items.length > 0) {
-                let itemsHtml = `
-                    <h3 class="text-gray-700 text-lg font-semibold mb-3">현재 항목:</h3>
-                    <ul class="space-y-2">
-                `;
-                appState.sharedVote.items.forEach(item => {
-                    itemsHtml += `
-                        <li class="flex justify-between items-center bg-gray-100 p-3 rounded-lg shadow-sm">
-                            <span class="text-gray-800 text-base">${item.name}</span>
-                            <button data-id="${item.id}" class="remove-item-btn ml-4 text-red-500 hover:text-red-700 transition duration-200" aria-label="Remove ${item.name}">
-                                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                                    <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
-                                </svg>
+                        <div class="grid grid-cols-1 gap-4 mb-8">
+                            ${appState.pollOptions.map((option, index) => `
+                            <button
+                                data-index="${index}"
+                                class="vote-option-btn p-5 rounded-lg text-xl font-semibold transition-all duration-200
+                                ${currentVoterVotes.includes(index)
+                                    ? 'bg-indigo-600 text-white shadow-md transform scale-105'
+                                    : 'bg-indigo-100 text-indigo-800 hover:bg-indigo-200'
+                                }
+                            ">
+                                ${option}
                             </button>
-                        </li>
-                    `;
-                });
-                itemsHtml += `</ul>`;
-                itemsListContainer.innerHTML = itemsHtml;
+                            `).join('')}
+                        </div>
 
-                document.querySelectorAll('.remove-item-btn').forEach(button => {
-                    button.addEventListener('click', (e) => {
-                        handleSharedRemoveItem(e.currentTarget.dataset.id);
-                    });
-                });
-            } else {
-                itemsListContainer.innerHTML = '';
-            }
-        };
-
-        const handleSharedAddItem = () => {
-            if (appState.sharedVote.newItemName.trim()) {
-                appState.sharedVote.items.push({ id: generateUniqueId(), name: appState.sharedVote.newItemName.trim() });
-                appState.sharedVote.newItemName = '';
-                renderSharedItemsList(); // Re-render only the items list
-                document.getElementById('new-item').value = ''; // Clear input field
-            }
-        };
-
-        const handleSharedRemoveItem = (idToRemove) => {
-            appState.sharedVote.items = appState.sharedVote.items.filter(item => item.id !== idToRemove);
-            renderSharedItemsList(); // Re-render only the items list
-        };
-
-        const handleCreateSharedVote = async () => {
-            if (!appState.sharedVote.title.trim() || appState.sharedVote.items.length === 0) {
-                showMessage('투표 제목과 항목을 입력해주세요.');
-                return;
-            }
-            if (!db || !appState.userId) {
-                showMessage('데이터베이스 연결 또는 사용자 인증 대기 중입니다. 잠시 후 다시 시도해주세요.', 3000);
-                return;
-            }
-
-            try {
-                const initialItemsWithVotes = appState.sharedVote.items.map(item => ({ ...item, votes: 0 }));
-                const newVoteId = generateUniqueId();
-                const voteData = {
-                    title: appState.sharedVote.title.trim(),
-                    items: initialItemsWithVotes,
-                    createdAt: new Date().toISOString(),
-                    realtimeResults: appState.sharedVote.realtimeResults,
-                    createdBy: appState.userId,
-                };
-
-                const voteDocRef = doc(db, `artifacts/${appId}/public/data/votes`, newVoteId);
-                await setDoc(voteDocRef, voteData);
-
-                appState.sharedVote.voteId = newVoteId;
-                appState.sharedVote.phase = 'created';
-                showMessage('투표가 성공적으로 생성되었습니다!', 2000);
-                window.history.pushState({}, '', `/vote/${newVoteId}`);
-                renderApp();
-            } catch (e) {
-                console.error("Error adding document: ", e);
-                showMessage('투표 생성 중 오류가 발생했습니다.', 3000);
-            }
-        };
-
-        // Render Shared Vote Created Phase
-        const renderSharedVoteCreated = () => {
-            const main = document.getElementById('app-main');
-            const currentUrl = `${window.location.origin}/vote/${appState.sharedVote.voteId}`;
-            main.innerHTML = `
-                <div class="flex flex-col items-center p-4 bg-gray-50 min-h-screen w-full">
-                    <h3 class="text-3xl font-bold text-gray-800 mb-6">투표가 생성되었습니다!</h3>
-                    <p class="text-xl text-gray-700 mb-4">링크를 공유하거나 QR 코드를 스캔하세요:</p>
-                    <a
-                        href="${currentUrl}"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        class="block text-blue-600 hover:underline text-lg mb-6 break-all"
-                    >
-                        ${currentUrl}
-                    </a>
-                    <div class="flex justify-center mb-8 p-4 bg-gray-100 rounded-lg">
-                        <canvas id="qrCanvas" class="w-64 h-64"></canvas>
-                    </div>
-                    <p class="text-gray-600 text-sm mb-4">
-                        참가자는 각자 스마트폰으로 접속 후 투표하며, 쿠키/IP 기반으로 1인 1표 제한됩니다.
-                    </p>
-                    <div class="flex flex-col sm:flex-row justify-center gap-4 mt-6">
-                        <button id="reset-shared-btn" class="px-8 py-4 bg-red-600 text-white rounded-lg shadow-xl hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 transition duration-200 text-xl font-bold">
-                            새 투표 만들기
+                        <button id="submit-vote-next-btn"
+                            class="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-4 px-6 rounded-lg shadow-md transition-colors duration-300 transform hover:scale-105 text-xl">
+                            ${appState.currentVoterIndex < appState.voterCount - 1 ? '다음 사람 투표' : '결과 보기'}
                         </button>
-                        <button id="home-from-shared-created-btn" class="px-8 py-4 bg-gray-600 text-white rounded-lg shadow-xl hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-gray-500 focus:ring-offset-2 transition duration-200 text-xl font-bold">
-                            홈으로
+                        <button id="back-to-home-btn"
+                            class="w-full mt-4 bg-gray-300 hover:bg-gray-400 text-gray-800 font-bold py-3 px-6 rounded-lg transition-colors duration-300">
+                            홈으로 돌아가기
                         </button>
                     </div>
                 </div>
             `;
-
-            // Generate QR code
-            if (window.QRious) {
-                new window.QRious({
-                    element: document.getElementById('qrCanvas'),
-                    value: currentUrl,
-                    size: 256,
-                    level: 'H'
-                });
-            }
-
-            document.getElementById('reset-shared-btn').addEventListener('click', handleSharedReset);
-            document.getElementById('home-from-shared-created-btn').addEventListener('click', handleGoHome);
-        };
-
-        // Render Shared Vote Participant Phase
-        const renderSharedVoteParticipant = () => {
-            const main = document.getElementById('app-main');
-            if (!appState.sharedVote.currentVoteData && !appState.message) {
-                main.innerHTML = `<div class="text-center text-gray-600 text-xl mt-20">투표 데이터를 로드 중입니다...</div>`;
-                return;
-            }
-
-            if (!appState.sharedVote.currentVoteData) {
-                main.innerHTML = `<div class="text-center text-red-600 text-xl mt-20">${appState.message || '투표를 찾을 수 없습니다.'}</div>`;
-                return;
-            }
-
-            const voteData = appState.sharedVote.currentVoteData;
-            main.innerHTML = `
-                <div class="flex flex-col items-center p-4 bg-gray-50 min-h-screen w-full">
-                    <h3 class="text-4xl font-extrabold text-blue-700 mb-8">${voteData.title}</h3>
-                    <p class="text-lg text-gray-600 mb-6">
-                        투표에 참여해주세요! (사용자 ID: ${appState.userId ? appState.userId.substring(0, 8) + '...' : '로딩 중...'})
-                    </p>
-                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8 w-full max-w-4xl" id="participant-vote-items-container">
-                        <!-- Participant vote buttons will be rendered here -->
-                    </div>
-                    <div id="participant-charts-container" class="w-full max-w-5xl">
-                        <!-- Charts will be rendered here if realtime results are enabled -->
-                    </div>
-                    ${!voteData.realtimeResults ? `<p class="text-lg text-gray-600 mt-8">투표 결과는 마감 후 공개됩니다.</p>` : ''}
-                    <button id="home-from-shared-participant-btn" class="mt-10 px-8 py-4 bg-gray-600 text-white rounded-lg shadow-xl hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-gray-500 focus:ring-offset-2 transition duration-200 text-xl font-bold">
-                        홈으로
-                    </button>
-                </div>
-            `;
-
-            const participantVoteItemsContainer = document.getElementById('participant-vote-items-container');
-            voteData.items.forEach(item => {
-                const button = document.createElement('button');
-                button.className = 'relative flex items-center justify-center p-6 bg-blue-500 text-white rounded-xl shadow-lg hover:bg-blue-600 focus:outline-none focus:ring-4 focus:ring-blue-300 focus:ring-offset-2 transition duration-300 transform hover:scale-105 text-2xl font-bold min-h-[120px]';
-                button.dataset.id = item.id;
-                button.innerHTML = `
-                    ${item.name}
-                    ${voteData.realtimeResults ? `<span class="absolute top-2 right-4 text-white text-opacity-75 text-sm">${item.votes} 표</span>` : ''}
-                `;
-                button.addEventListener('click', () => handleParticipantVote(item.id));
-                participantVoteItemsContainer.appendChild(button);
+            document.querySelectorAll('.vote-option-btn').forEach(button => {
+                button.onclick = (e) => handleSingleDeviceVote(parseInt(e.target.dataset.index));
             });
+            document.getElementById('submit-vote-next-btn').onclick = submitSingleDeviceVoteAndNext;
+            document.getElementById('back-to-home-btn').onclick = () => navigateTo('home');
+        }
 
-            if (voteData.realtimeResults) {
-                renderCharts(voteData.items, 'participant-charts-container');
+        function renderResultsView(results, options, title, type, showBackToHome = true) {
+            const appDiv = document.getElementById('app');
+            const totalVotes = Object.values(results).reduce((sum, count) => sum + count, 0);
+
+            const sortedResults = Object.entries(results)
+                .map(([index, count]) => ({
+                    option: options[parseInt(index)],
+                    count: count,
+                    percentage: totalVotes > 0 ? (count / totalVotes) * 100 : 0
+                }))
+                .sort((a, b) => b.count - a.count);
+
+            appDiv.innerHTML = `
+                <div class="flex flex-col items-center p-4 bg-gray-50 min-h-screen">
+                    <div class="bg-white p-8 rounded-xl shadow-lg w-full max-w-2xl mt-8">
+                        <h2 class="text-3xl font-bold mb-6 text-gray-800 text-center">
+                            "${title}" 투표 결과
+                        </h2>
+
+                        <div class="space-y-4 mb-8">
+                            ${sortedResults.map((item, index) => `
+                            <div class="flex items-center">
+                                <span class="text-lg font-medium text-gray-700 w-1/3">${item.option}</span>
+                                <div class="flex-grow bg-gray-200 rounded-full h-8 relative overflow-hidden">
+                                    <div
+                                        class="bg-indigo-500 h-full rounded-full flex items-center justify-end pr-2 text-white font-bold"
+                                        style="width: ${item.percentage}%"
+                                    >
+                                        ${item.count > 0 ? `${Math.round(item.percentage)}%` : ''}
+                                    </div>
+                                </div>
+                                <span class="ml-4 text-lg font-semibold text-gray-800 w-16 text-right">${item.count}표</span>
+                            </div>
+                            `).join('')}
+                        </div>
+
+                        ${type === 'multi' && appState.multiDevicePollData && appState.multiDevicePollData.creatorId === appState.userId && !appState.pollClosed ? `
+                        <button id="close-poll-btn"
+                            class="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-6 rounded-lg shadow-md transition-colors duration-300 transform hover:scale-105 text-lg mb-4">
+                            투표 마감하기
+                        </button>
+                        ` : ''}
+
+                        ${showBackToHome ? `
+                        <button id="back-to-home-btn"
+                            class="w-full bg-gray-300 hover:bg-gray-400 text-gray-800 font-bold py-3 px-6 rounded-lg transition-colors duration-300">
+                            홈으로 돌아가기
+                        </button>
+                        ` : ''}
+                    </div>
+                </div>
+            `;
+            if (type === 'multi' && appState.multiDevicePollData && appState.multiDevicePollData.creatorId === appState.userId && !appState.pollClosed) {
+                document.getElementById('close-poll-btn').onclick = closeMultiDevicePoll;
             }
+            if (showBackToHome) {
+                document.getElementById('back-to-home-btn').onclick = () => navigateTo('home');
+            }
+        }
 
-            document.getElementById('home-from-shared-participant-btn').addEventListener('click', handleGoHome);
-        };
+        function renderMultiDeviceShareView() {
+            const appDiv = document.getElementById('app');
+            appDiv.innerHTML = `
+                <div class="flex flex-col items-center p-4 bg-gray-50 min-h-screen">
+                    <div class="bg-white p-8 rounded-xl shadow-lg w-full max-w-xl mt-8 text-center">
+                        <h2 class="text-3xl font-bold mb-6 text-gray-800">투표가 생성되었습니다!</h2>
+                        <p class="text-xl text-gray-600 mb-4">
+                            아래 링크 또는 QR 코드를 공유하여 투표에 참여하세요.
+                        </p>
 
-        const handleParticipantVote = async (itemId) => {
-            if (!db || !appState.userId || !appState.sharedVote.currentVoteData || !appState.sharedVote.voteId) {
-                showMessage('데이터베이스 연결 또는 투표 데이터 로드 대기 중입니다.', 3000);
+                        <div class="mb-6 bg-gray-100 p-4 rounded-lg break-words">
+                            <p class="text-lg font-mono text-gray-800">
+                                <a href="${window.location.origin}/share/${appState.activePollId}" target="_blank" rel="noopener noreferrer" class="text-indigo-600 hover:underline">
+                                    ${window.location.origin}/share/${appState.activePollId}
+                                </a>
+                            </p>
+                        </div>
+
+                        ${appState.qrCodeUrl ? `
+                        <div class="mb-8 p-4 border border-gray-200 rounded-lg inline-block">
+                            <img src="${appState.qrCodeUrl}" alt="QR Code" class="w-48 h-48 mx-auto" />
+                            <p class="text-sm text-gray-500 mt-2">QR 코드를 스캔하여 참여</p>
+                        </div>
+                        ` : ''}
+
+                        <button id="view-results-btn"
+                            class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-4 px-6 rounded-lg shadow-md transition-colors duration-300 transform hover:scale-105 text-xl mb-4">
+                            실시간 결과 보기
+                        </button>
+                        <button id="back-to-home-btn"
+                            class="w-full bg-gray-300 hover:bg-gray-400 text-gray-800 font-bold py-3 px-6 rounded-lg transition-colors duration-300">
+                            홈으로 돌아가기
+                        </button>
+                    </div>
+                </div>
+            `;
+            document.getElementById('view-results-btn').onclick = () => {
+                appState.currentView = 'multiDeviceResults';
+                renderApp();
+            };
+            document.getElementById('back-to-home-btn').onclick = () => navigateTo('home');
+        }
+
+        function renderMultiDeviceVoteView() {
+            const appDiv = document.getElementById('app');
+            if (!appState.multiDevicePollData) {
+                appDiv.innerHTML = `
+                    <div class="flex items-center justify-center min-h-screen bg-gray-50">
+                        <p class="text-xl text-gray-700">투표 정보를 불러오는 중입니다...</p>
+                    </div>
+                `;
                 return;
             }
 
-            const votedKey = `voted_${appState.sharedVote.voteId}`;
-            const hasVoted = localStorage.getItem(votedKey);
+            const hasVoted = appState.multiDevicePollData.votes && appState.multiDevicePollData.votes[appState.userId];
+            const userCurrentVotes = hasVoted ? appState.multiDevicePollData.votes[appState.userId] : [];
 
-            if (hasVoted) {
-                showMessage('이미 투표하셨습니다.', 2000);
-                return;
+            appDiv.innerHTML = `
+                <div class="flex flex-col items-center p-4 bg-gray-50 min-h-screen">
+                    <div class="bg-white p-8 rounded-xl shadow-lg w-full max-w-xl mt-8 text-center">
+                        <h2 class="text-3xl font-bold mb-4 text-gray-800">${appState.multiDevicePollData.title}</h2>
+                        ${appState.pollClosed ? `
+                            <p class="text-red-500 text-2xl font-bold mb-6">이 투표는 마감되었습니다.</p>
+                        ` : `
+                            <p class="text-xl text-gray-600 mb-6">
+                                ${appState.multiDevicePollData.isMultiSelect ? '복수 선택 가능' : '하나만 선택 가능'}
+                            </p>
+                        `}
+
+                        <div class="grid grid-cols-1 gap-4 mb-8">
+                            ${appState.multiDevicePollData.options.map((option, index) => `
+                            <button
+                                data-index="${index}"
+                                ${appState.pollClosed ? 'disabled' : ''}
+                                class="vote-option-btn p-5 rounded-lg text-xl font-semibold transition-all duration-200
+                                ${userCurrentVotes.includes(index)
+                                    ? 'bg-indigo-600 text-white shadow-md transform scale-105'
+                                    : 'bg-indigo-100 text-indigo-800 hover:bg-indigo-200'
+                                }
+                                ${appState.pollClosed ? 'opacity-60 cursor-not-allowed' : ''}
+                            ">
+                                ${option}
+                            </button>
+                            `).join('')}
+                        </div>
+
+                        ${appState.multiDevicePollData.showResultsAfterClose && !appState.pollClosed ? `
+                            <p class="text-gray-500 text-lg mb-4">
+                                결과는 투표 마감 후 공개됩니다.
+                            </p>
+                        ` : ''}
+
+                        ${!appState.multiDevicePollData.showResultsAfterClose ? `
+                            <button id="view-results-btn"
+                                class="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-4 px-6 rounded-lg shadow-md transition-colors duration-300 transform hover:scale-105 text-xl mb-4">
+                                실시간 결과 보기
+                            </button>
+                        ` : ''}
+                        <button id="back-to-home-btn"
+                            class="w-full bg-gray-300 hover:bg-gray-400 text-gray-800 font-bold py-3 px-6 rounded-lg transition-colors duration-300">
+                            홈으로 돌아가기
+                        </button>
+                    </div>
+                </div>
+            `;
+            document.querySelectorAll('.vote-option-btn').forEach(button => {
+                button.onclick = (e) => handleMultiDeviceVote(parseInt(e.target.dataset.index));
+            });
+            if (!appState.multiDevicePollData.showResultsAfterClose) {
+                document.getElementById('view-results-btn').onclick = () => {
+                    appState.currentView = 'multiDeviceResults';
+                    renderApp();
+                };
             }
+            document.getElementById('back-to-home-btn').onclick = () => navigateTo('home');
+        }
 
-            try {
-                const voteDocRef = doc(db, `artifacts/${appId}/public/data/votes`, appState.sharedVote.voteId);
-                const docSnap = await getDoc(voteDocRef);
-
-                if (docSnap.exists()) {
-                    const data = docSnap.data();
-                    const updatedItems = data.items.map(item =>
-                        item.id === itemId ? { ...item, votes: item.votes + 1 } : item
-                    );
-                    await updateDoc(voteDocRef, { items: updatedItems });
-                    localStorage.setItem(votedKey, 'true');
-                    showMessage('투표가 완료되었습니다!', 2000);
-                } else {
-                    showMessage('투표를 찾을 수 없습니다.', 3000);
-                }
-            } catch (e) {
-                console.error("Error updating document: ", e);
-                showMessage('투표 중 오류가 발생했습니다.', 3000);
-            }
-        };
-
-        const handleSharedReset = () => {
-            appState.sharedVote = { phase: 'setup', title: '', items: [], newItemName: '', voteId: '', currentVoteData: null, realtimeResults: true };
-            window.history.pushState({}, '', '/share');
-            renderApp();
-        };
-
-        // Main render function
-        const renderApp = () => {
-            renderMessage(); // Always render message display
-
-            switch (appState.view) {
+        // Main render function to switch views
+        function renderApp() {
+            switch (appState.currentView) {
                 case 'home':
-                    renderHomePage();
+                    renderHomeView();
                     break;
-                case 'local':
-                    if (appState.localVote.phase === 'setup') {
-                        renderLocalVoteSetup();
-                    } else if (appState.localVote.phase === 'voting') {
-                        renderLocalVoteVoting();
-                    } else if (appState.localVote.phase === 'results') {
-                        renderLocalVoteResults();
-                    }
+                case 'singleDeviceCreate':
+                    renderPollCreationForm('single');
                     break;
-                case 'share':
-                    if (appState.sharedVote.phase === 'setup') {
-                        renderSharedVoteSetup();
-                    } else if (appState.sharedVote.phase === 'created') {
-                        renderSharedVoteCreated();
-                    } else if (appState.sharedVote.phase === 'participant') {
-                        renderSharedVoteParticipant();
-                    }
+                case 'singleDeviceVote':
+                    renderSingleDeviceVoteView();
+                    break;
+                case 'singleDeviceResults':
+                    renderResultsView(appState.singleDevicePollResults, appState.pollOptions, appState.pollTitle, 'single');
+                    break;
+                case 'multiDeviceCreate':
+                    renderPollCreationForm('multi');
+                    break;
+                case 'multiDeviceShare':
+                    renderMultiDeviceShareView();
+                    break;
+                case 'multiDeviceVote':
+                    renderMultiDeviceVoteView();
+                    break;
+                case 'multiDeviceResults':
+                    renderResultsView(appState.multiDevicePollResults, appState.multiDevicePollData.options, appState.multiDevicePollData.title, 'multi');
                     break;
                 default:
-                    renderHomePage();
+                    renderHomeView();
             }
-        };
+            renderModal(); // Ensure modal is rendered on top if active
+        }
 
-        // Handle navigation to home
-        const handleGoHome = () => {
-            appState.view = 'home';
-            window.history.pushState({}, '', '/'); // Reset URL to home
-            // If there's an active Firestore listener, unsubscribe it
-            if (unsubscribeFromVote) {
-                unsubscribeFromVote();
-                unsubscribeFromVote = null;
-            }
-            renderApp();
-        };
-        document.getElementById('home-button').addEventListener('click', handleGoHome);
-
-        // Initial setup and routing
-        const initializeAndRoute = async () => {
-            // Firebase Auth
-            onAuthStateChanged(auth, async (user) => {
-                if (user) {
-                    appState.userId = user.uid;
-                } else {
-                    try {
-                        if (initialAuthToken) {
-                            await signInWithCustomToken(auth, initialAuthToken);
-                        } else {
-                            await signInAnonymously(auth);
-                        }
-                        appState.userId = auth.currentUser?.uid || crypto.randomUUID(); // Fallback for anonymous
-                    } catch (error) {
-                        console.error("Authentication failed:", error);
-                        appState.userId = crypto.randomUUID(); // Use a random ID if auth fails
+        // Initial Firebase Auth and Firestore Initialization
+        async function initializeFirebaseAndAuth() {
+            try {
+                if (!auth.currentUser) {
+                    if (initialAuthToken) {
+                        await signInWithCustomToken(auth, initialAuthToken);
+                    } else {
+                        await signInAnonymously(auth);
                     }
                 }
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        appState.userId = user.uid;
+                    } else {
+                        appState.userId = crypto.randomUUID(); // Fallback for unauthenticated users
+                    }
+                    appState.isAuthReady = true;
+                    // Handle URL-based poll access after auth is ready
+                    const path = window.location.pathname;
+                    const pollIdFromUrl = path.split('/share/')[1];
+                    if (pollIdFromUrl) {
+                        appState.activePollId = pollIdFromUrl;
+                        appState.currentView = 'multiDeviceVote';
+                        fetchMultiDevicePoll(pollIdFromUrl);
+                    } else if (path === '/share') {
+                        appState.currentView = 'multiDeviceCreate';
+                    } else {
+                        appState.currentView = 'home';
+                    }
+                    renderApp(); // Initial render after auth is ready and view is set
+                });
+            } catch (error) {
+                console.error("Firebase authentication failed:", error);
+                showCustomModal("Firebase 인증에 실패했습니다.", "error");
+                appState.userId = crypto.randomUUID(); // Still set a random ID to proceed
                 appState.isAuthReady = true;
-
-                // Handle URL parsing for initial view
-                const pathParts = window.location.pathname.split('/');
-                if (pathParts[1] === 'vote' && pathParts[2]) {
-                    appState.view = 'share';
-                    appState.sharedVote.voteId = pathParts[2];
-                    appState.sharedVote.phase = 'participant';
-
-                    // Set up Firestore listener for participant view
-                    if (db && appState.sharedVote.voteId) {
-                        const voteDocRef = doc(db, `artifacts/${appId}/public/data/votes`, appState.sharedVote.voteId);
-                        unsubscribeFromVote = onSnapshot(voteDocRef, (docSnap) => {
-                            if (docSnap.exists()) {
-                                appState.sharedVote.currentVoteData = docSnap.data();
-                            } else {
-                                showMessage('투표를 찾을 수 없습니다.', 3000);
-                                appState.sharedVote.currentVoteData = null;
-                            }
-                            renderApp(); // Re-render when data changes
-                        }, (error) => {
-                            console.error("Error listening to vote document:", error);
-                            showMessage('투표 데이터를 불러오는 중 오류가 발생했습니다.', 3000);
-                        });
-                    }
-                }
-                renderApp(); // Initial render after auth and routing
-            });
-        };
-
-        // Start the application
-        window.onload = initializeAndRoute;
-
-        // Handle browser back/forward buttons
-        window.addEventListener('popstate', () => {
-            const pathParts = window.location.pathname.split('/');
-            if (pathParts[1] === 'vote' && pathParts[2]) {
-                appState.view = 'share';
-                appState.sharedVote.voteId = pathParts[2];
-                appState.sharedVote.phase = 'participant';
-            } else {
-                appState.view = 'home';
+                renderApp(); // Render even if auth fails
             }
-            renderApp();
-        });
+        }
 
+        // Start the application when the DOM is fully loaded
+        window.onload = function() {
+            if (app && db && auth) {
+                initializeFirebaseAndAuth();
+            } else {
+                showCustomModal("Firebase가 올바르게 초기화되지 않았습니다. 콘솔 오류를 확인하십시오.", "error");
+                // Fallback to home view if Firebase init fails
+                appState.currentView = 'home';
+                renderApp();
+            }
+        };
     </script>
 </body>
 </html>
