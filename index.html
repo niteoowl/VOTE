@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>초간단 웹 투표</title>
+    <title>초간간 웹 투표</title>
     <!-- Tailwind CSS CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- Inter Font -->
@@ -51,13 +51,24 @@
     <!-- Firebase SDKs -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, doc, getDoc, addDoc, setDoc, updateDoc, onSnapshot, collection, query, where, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        // Firebase configuration and app ID are provided by the Canvas environment
-        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        // IMPORTANT: Replace with your actual Firebase project configuration
+        // You can find this in your Firebase project settings -> Project settings -> General -> Your apps
+        const firebaseConfig = {
+            apiKey: "YOUR_API_KEY", // Replace with your actual API Key
+            authDomain: "YOUR_AUTH_DOMAIN", // Replace with your actual Auth Domain
+            projectId: "YOUR_PROJECT_ID", // Replace with your actual Project ID
+            storageBucket: "YOUR_STORAGE_BUCKET", // Replace with your actual Storage Bucket
+            messagingSenderId: "YOUR_MESSAGING_SENDER_ID", // Replace with your actual Messaging Sender ID
+            appId: "YOUR_APP_ID" // Replace with your actual App ID
+        };
+
+        // For multi-device polls, you need a consistent app ID.
+        // In a real deployment, you might hardcode this or use an environment variable.
+        // For now, you can set a unique string here.
+        const APP_IDENTIFIER = "my-simple-poll-app"; // Replace with a unique identifier for your app
 
         // Initialize Firebase
         let app;
@@ -71,7 +82,7 @@
             auth = getAuth(app);
         } catch (error) {
             console.error("Firebase initialization failed:", error);
-            showCustomModal("Firebase 초기화에 실패했습니다.", "error");
+            showCustomModal("Firebase 초기화에 실패했습니다. 콘솔 오류를 확인하고 Firebase 설정을 올바르게 입력했는지 확인하세요.", "error");
         }
 
         // Global state for the application
@@ -225,7 +236,8 @@
             }
 
             const newPollId = generatePollId();
-            const pollRef = doc(db, `artifacts/${appId}/public/data/polls`, newPollId);
+            // Store multi-device polls under a general 'polls' collection, using APP_IDENTIFIER
+            const pollRef = doc(db, `apps/${APP_IDENTIFIER}/polls`, newPollId);
             const pollData = {
                 title: appState.pollTitle,
                 options: appState.pollOptions,
@@ -256,7 +268,8 @@
                 unsubscribePollSnapshot();
             }
 
-            const pollDocRef = doc(db, `artifacts/${appId}/public/data/polls`, pollId);
+            // Fetch multi-device polls from the general 'polls' collection
+            const pollDocRef = doc(db, `apps/${APP_IDENTIFIER}/polls`, pollId);
             unsubscribePollSnapshot = onSnapshot(pollDocRef, (docSnap) => {
                 if (docSnap.exists()) {
                     const data = docSnap.data();
@@ -291,7 +304,7 @@
                 return;
             }
 
-            const pollRef = doc(db, `artifacts/${appId}/public/data/polls`, appState.activePollId);
+            const pollRef = doc(db, `apps/${APP_IDENTIFIER}/polls`, appState.activePollId);
             let newVotes = { ...appState.multiDevicePollData.votes };
             let userVotes = newVotes[appState.userId] || [];
 
@@ -334,7 +347,7 @@
                 showCustomModal("투표를 마감할 권한이 없습니다.", "error");
                 return;
             }
-            const pollRef = doc(db, `artifacts/${appId}/public/data/polls`, appState.activePollId);
+            const pollRef = doc(db, `apps/${APP_IDENTIFIER}/polls`, appState.activePollId);
             try {
                 await updateDoc(pollRef, { closed: true });
                 showCustomModal("투표가 마감되었습니다.");
@@ -367,6 +380,8 @@
         function navigateTo(view) {
             resetPollCreation();
             appState.currentView = view;
+            // This simple routing works for direct URL access but might need more robust handling
+            // for single-page application style navigation in a production environment.
             if (view === 'home') {
                 window.history.pushState({}, '', '/');
             } else if (view === 'multiDeviceCreate') {
@@ -792,18 +807,17 @@
         // Initial Firebase Auth and Firestore Initialization
         async function initializeFirebaseAndAuth() {
             try {
-                if (!auth.currentUser) {
-                    if (initialAuthToken) {
-                        await signInWithCustomToken(auth, initialAuthToken);
-                    } else {
-                        await signInAnonymously(auth);
-                    }
-                }
+                // In a real deployment, you'd implement proper user authentication (e.g., email/password, Google Sign-In).
+                // For simplicity, we'll use anonymous sign-in, but this means userId changes if user clears cookies.
+                await signInAnonymously(auth);
+
                 onAuthStateChanged(auth, (user) => {
                     if (user) {
                         appState.userId = user.uid;
                     } else {
-                        appState.userId = crypto.randomUUID(); // Fallback for unauthenticated users
+                        // Fallback for unauthenticated users, or if anonymous sign-in fails
+                        appState.userId = localStorage.getItem('pollUserId') || crypto.randomUUID();
+                        localStorage.setItem('pollUserId', appState.userId);
                     }
                     appState.isAuthReady = true;
                     // Handle URL-based poll access after auth is ready
@@ -822,8 +836,9 @@
                 });
             } catch (error) {
                 console.error("Firebase authentication failed:", error);
-                showCustomModal("Firebase 인증에 실패했습니다.", "error");
-                appState.userId = crypto.randomUUID(); // Still set a random ID to proceed
+                showCustomModal("Firebase 인증에 실패했습니다. 익명 로그인을 시도합니다.", "error");
+                appState.userId = localStorage.getItem('pollUserId') || crypto.randomUUID(); // Try to get existing or create new
+                localStorage.setItem('pollUserId', appState.userId);
                 appState.isAuthReady = true;
                 renderApp(); // Render even if auth fails
             }
